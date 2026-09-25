@@ -276,3 +276,27 @@ ul.plain li { padding: 4px 0; font-size: 14px; }
   color: #fff;
 }
 .repair-apply:hover { background: #75491f; }
+
+/* 互斥说法下的先后查询 */
+.precedence-query {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.precedence-query input[type="text"] {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fdfcf9;
+  color: var(--ink);
+  width: 140px;
+}
+.precedence-query input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.tag.choice { background: #e6eef9; color: #2b5d8a; }
+.tag.combo-ok { background: var(--ok-bg); color: var(--ok); }
+.tag.combo-conflict { background: var(--err-bg); color: var(--err); }

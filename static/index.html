@@ -21,6 +21,8 @@
         可解时只为<strong>与锚点连通</strong>的事件显示绝对日期时刻，其余标为<strong>“未定位”</strong>。
         此外可任选一条原始行做<strong>约束冗余核对</strong>：删去该行后，检验其余叙述是否仍必然满足它的时间差区间；
         也可把<strong>基准版与修订版</strong>两版文本分别粘贴做<strong>两版比较</strong>：按事件名对齐，给出新增、删除事件与共同事件的分钟变化及修订行证据。
+        还可输入<strong>互斥候选组</strong>（每行 <code>区间A | 区间B</code>，最多 6 行，两种说法只能采信其一）做<strong>先后查询</strong>：
+        枚举全部组合与共同约束联立、排除冲突组合，合并各可行组合的最紧上下界，判定甲、乙是否<strong>始终</strong>一方在先。
       </p>
     </header>
 
@@ -113,6 +115,35 @@
     </section>
 
     <section id="compare-result" aria-live="polite"></section>
+
+    <section class="input-area">
+      <label for="mutex-input"><strong>互斥说法下的先后查询</strong></label>
+      <p class="muted" style="margin-top:0">
+        上方“事件区间”文本作为<strong>共同约束</strong>；此处每行输入一组互斥说法
+        <code>区间A | 区间B</code>（最多 6 行，两侧均为 <code>事件甲,事件乙,最少分钟,最多分钟</code>），
+        表示同一事实的两种说法<strong>只能采信其一</strong>。后端枚举全部组合（每组二选一，至多 2⁶=64 种）与共同约束联立，
+        <strong>排除冲突组合</strong>；对每个可行组合求查询事件时间差 <strong>t(乙) − t(甲)</strong> 的最紧上下界，
+        再跨组合取<strong>最小下界、最大上界</strong>（任一组合对应端无界则合并端无界）。
+        合并下界 ≥ 1 分钟判<strong>“甲始终先于乙”</strong>，合并上界 ≤ −1 分钟判<strong>“甲始终后于乙”</strong>，
+        否则判<strong>“不确定”</strong>；无可行组合时不作先后判断。查询的甲、乙必须出现在共同约束中。
+      </p>
+      <div class="precedence-query">
+        <span>查询事件</span>
+        <input id="precedence-a" type="text" placeholder="甲" />
+        <span>与</span>
+        <input id="precedence-b" type="text" placeholder="乙" />
+        <span class="muted">的先后（比较 t(乙) − t(甲)）</span>
+      </div>
+      <textarea id="mutex-input" rows="6" spellcheck="false"
+        placeholder="起床,开会,80,100 | 起床,开会,300,400&#10;开会,晚饭,60,120 | 晚饭,开会,30,60"></textarea>
+      <div class="button-row">
+        <button id="btn-precedence" class="primary">先后查询</button>
+        <button id="btn-precedence-example">填入互斥示例</button>
+        <button id="btn-precedence-clear" class="ghost">清空候选组</button>
+      </div>
+    </section>
+
+    <section id="precedence-result" aria-live="polite"></section>
 
     <section id="result" aria-live="polite"></section>
   </main>

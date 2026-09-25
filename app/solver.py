@@ -36,6 +36,15 @@
 任意平移的可行解充当真实日期，而是对每个事件用冗余核对同款单源最短路求其相对零点的
 最紧下界/上界：仅与锚点连通（两端都有界）的事件给出绝对日期时刻（精确点或范围），
 其余事件标为“未定位”。
+
+互斥说法下的先后查询（query_precedence）：区间文本作为共同约束，另输入最多 6 行
+互斥候选组，每行“区间A | 区间B”（两侧均为现有区间行格式）表示同一事实的两种说法
+只能采信其一；查询事件甲、乙必须出现在共同约束中。枚举 2^组数 个组合：每组取一侧
+说法加入共同约束复用 solve_rows 联立，存在负环的组合判为冲突组合并排除；对每个可行
+组合用冗余核对同款 _derive_bound 求 t(乙) − t(甲) 的最紧下界/上界（两端可能无界）。
+跨组合合并：下界取最小、上界取最大，任一可行组合对应端无界则合并端无界。无可行组合
+时不作先后判断；合并下界 ≥ 1 分钟判“甲始终先于乙”，合并上界 ≤ −1 分钟判“甲始终
+后于乙”，否则判“不确定”。
 """
 
 from __future__ import annotations
@@ -889,5 +898,227 @@ def solve_anchored(text: str, anchors_text: str) -> dict:
         "event_count": len(events),
         "located_count": located_count,
         "anchor_count": len(anchors),
+        "line_count": len(rows),
+    }
+
+
+# ---------- 互斥说法下的先后查询 ----------
+
+# 互斥候选组最多行数：每组二选一，组合数为 2^组数，限制组数即限制枚举规模
+MAX_MUTEX_GROUPS = 6
+
+
+@dataclass(frozen=True)
+class MutexGroup:
+    line: int  # 候选组文本的原始行号
+    left: Row  # “|”左侧说法（行号记为候选组行号）
+    right: Row  # “|”右侧说法
+
+
+def _parse_mutex_side(side: str, line_no: int, side_label: str) -> tuple[Row | None, str | None]:
+    """解析候选组一侧的区间说法（与区间行同一格式）。返回 (Row, None) 或 (None, 错误消息)。"""
+    parts = [p.strip() for p in side.replace("，", ",").split(",")]
+    if len(parts) != 4:
+        return None, f"{side_label}应为 4 个字段（事件甲,事件乙,最少分钟,最多分钟），实际得到 {len(parts)} 个"
+
+    a, b, low_s, high_s = parts
+    errs: list[str] = []
+    if not a:
+        errs.append(f"{side_label}事件甲名称为空")
+    if not b:
+        errs.append(f"{side_label}事件乙名称为空")
+
+    low, err_low = _parse_int(low_s, "最少分钟", line_no)
+    high, err_high = _parse_int(high_s, "最多分钟", line_no)
+    if err_low:
+        errs.append(side_label + err_low.split("：", 1)[1])
+    if err_high:
+        errs.append(side_label + err_high.split("：", 1)[1])
+
+    if low is not None and high is not None and low > high:
+        errs.append(f"{side_label}下界 {low} 大于上界 {high}，时间差区间为空")
+
+    if errs:
+        return None, "；".join(errs)
+    return Row(line_no, a, b, low, high), None  # type: ignore[arg-type]
+
+
+def parse_mutex_groups(text: str) -> tuple[list[MutexGroup], list[dict]]:
+    """按行解析互斥候选组：每行 “区间A | 区间B”，两侧均为现有区间行格式。
+
+    返回 (有效候选组, 错误列表)；空行跳过但行号保留为候选组文本的原始行号；
+    非空行超过 MAX_MUTEX_GROUPS 行时报错（组合数随组数指数增长，限制枚举规模）。
+    """
+    errors: list[dict] = []
+    groups: list[MutexGroup] = []
+
+    if not text or not text.strip():
+        return groups, [{"line": None, "message": "候选组输入为空：请粘贴每行 “区间A | 区间B” 的互斥候选组（1~6 行）。"}]
+
+    nonempty = 0
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue  # 空行不计入校验，但行号保留为候选组文本的原始行号
+        nonempty += 1
+        if nonempty > MAX_MUTEX_GROUPS:
+            errors.append({
+                "line": line_no,
+                "message": f"候选组最多 {MAX_MUTEX_GROUPS} 行（每组二选一，组合数随组数指数增长），当前已读到第 {nonempty} 条非空行。",
+            })
+            break  # 行数超限后不再逐行解析
+
+        # 兼容中文竖线
+        sides = [s.strip() for s in line.replace("｜", "|").split("|")]
+        if len(sides) != 2:
+            errors.append({
+                "line": line_no,
+                "message": f"候选组第{line_no}行：应为 “区间A | 区间B” 两段（用 | 分隔，表示两条只能选一条的说法），实际得到 {len(sides)} 段。",
+            })
+            continue
+
+        left, err_left = _parse_mutex_side(sides[0], line_no, "左侧")
+        right, err_right = _parse_mutex_side(sides[1], line_no, "右侧")
+        side_errors = [e for e in (err_left, err_right) if e]
+        if side_errors:
+            errors.append({"line": line_no, "message": f"候选组第{line_no}行：" + "；".join(side_errors) + "。"})
+            continue
+
+        groups.append(MutexGroup(line_no, left, right))  # type: ignore[arg-type]
+
+    return groups, errors
+
+
+def query_precedence(text: str, groups_text: str, a: str, b: str) -> dict:
+    """互斥说法下的先后查询：共同约束 + 每组二选一的候选组，枚举全部组合联立。
+
+    流程：复用 parse_text 校验共同约束、parse_mutex_groups 校验候选组（每行
+    “区间A | 区间B”，最多 6 行）；查询事件甲、乙必须出现在共同约束中。
+    枚举 2^组数 个组合：每组取一侧说法加入共同约束，复用 solve_rows 联立——
+    存在负环的组合判为冲突组合并排除；可行组合上用冗余核对同款 _derive_bound
+    求 t(乙) − t(甲) 的最紧下界/上界（两端可能无界）。跨组合合并：下界取最小、
+    上界取最大；任一可行组合对应端无界则合并端无界。
+
+    判定：无可行组合 ⇒ 不作先后判断（no_feasible）；合并下界 ≥ 1 ⇒ 甲始终先于乙
+    （always_before）；合并上界 ≤ −1 ⇒ 甲始终后于乙（always_after）；其余 ⇒ 不确定
+    （uncertain）。
+    """
+    a = (a or "").strip()
+    b = (b or "").strip()
+
+    rows, errors = parse_text(text)
+    groups, group_errors = parse_mutex_groups(groups_text)
+    errors = errors + group_errors
+
+    if not a:
+        errors.append({"line": None, "message": "查询事件甲为空：请填写要查询先后的事件甲名称。"})
+    if not b:
+        errors.append({"line": None, "message": "查询事件乙为空：请填写要查询先后的事件乙名称。"})
+    if errors:
+        return {"status": "error", "errors": errors}
+    if not rows:
+        return {"status": "error", "errors": [{"line": None, "message": "没有可联立的共同约束行。"}]}
+    if not groups:
+        # parse_mutex_groups 对空文本已报错，正常不会走到；防御性返回
+        return {"status": "error", "errors": [{"line": None, "message": "没有有效候选组。"}]}
+
+    # 查询的甲、乙须出现在共同约束中
+    common_names = {r.a for r in rows} | {r.b for r in rows}
+    missing = [name for name in dict.fromkeys((a, b)) if name not in common_names]
+    if missing:
+        quoted = "、".join(f"“{m}”" for m in missing)
+        return {"status": "error", "errors": [{"line": None, "message":
+            f"查询事件 {quoted} 未出现在共同约束中：先后查询的甲、乙必须出现在上方事件区间文本里。"}]}
+
+    # 共同约束自身是否自洽（影响“无可行组合”时的说明，不影响枚举结果）
+    common_consistent = solve_rows(rows)["status"] == "ok"
+
+    combinations: list[dict] = []
+    feasible_count = 0
+    merged_low: int | None = None
+    merged_high: int | None = None
+    lower_bounded = True
+    upper_bounded = True
+
+    for mask in range(1 << len(groups)):
+        choices = ["right" if (mask >> i) & 1 else "left" for i in range(len(groups))]
+        chosen = [g.right if ch == "right" else g.left for g, ch in zip(groups, choices)]
+        result = solve_rows(rows + chosen)
+        combo: dict = {
+            "index": mask + 1,
+            "choices": choices,
+            "choice_texts": [_row_text(r, r.low, r.high) for r in chosen],
+        }
+        if result["status"] != "ok":
+            combo["status"] = "conflict"  # 该取舍与共同约束矛盾，排除
+            combinations.append(combo)
+            continue
+
+        names = result["names"]
+        edges = result["edges"]
+        index = result["index"]
+        ia, ib = index[a], index[b]
+        # 与冗余核对同款：甲 -> 乙 最短路为最紧上界，乙 -> 甲 最短路取负为最紧下界
+        high_val, _ = _derive_bound(names, edges, ia, ib)
+        low_val, _ = _derive_bound(names, edges, ib, ia)
+        derived_low = -low_val if low_val is not None else None
+        derived_high = high_val
+        combo["status"] = "ok"
+        combo["derived_low"] = derived_low
+        combo["derived_high"] = derived_high
+        combinations.append(combo)
+        feasible_count += 1
+
+        # 跨组合合并：下界取最小、上界取最大；任一组合对应端无界则合并端无界
+        if derived_low is None:
+            lower_bounded = False
+        elif merged_low is None or derived_low < merged_low:
+            merged_low = derived_low
+        if derived_high is None:
+            upper_bounded = False
+        elif merged_high is None or derived_high > merged_high:
+            merged_high = derived_high
+
+    total = 1 << len(groups)
+    if feasible_count == 0:
+        verdict = "no_feasible"
+        lower_bounded = upper_bounded = False
+    elif lower_bounded and merged_low is not None and merged_low >= 1:
+        verdict = "always_before"
+    elif upper_bounded and merged_high is not None and merged_high <= -1:
+        verdict = "always_after"
+    else:
+        verdict = "uncertain"
+
+    # 无界端与无可行组合的合并端点统一以 None 对外表示
+    if not lower_bounded:
+        merged_low = None
+    if not upper_bounded:
+        merged_high = None
+
+    return {
+        "status": "ok",
+        "a": a,
+        "b": b,
+        "groups": [
+            {
+                "line": g.line,
+                "left": _row_text(g.left, g.left.low, g.left.high),
+                "right": _row_text(g.right, g.right.low, g.right.high),
+            }
+            for g in groups
+        ],
+        "group_count": len(groups),
+        "combination_count": total,
+        "feasible_count": feasible_count,
+        "conflict_count": total - feasible_count,
+        "common_consistent": common_consistent,
+        "merged_low": merged_low,
+        "merged_high": merged_high,
+        "lower_bounded": lower_bounded,
+        "upper_bounded": upper_bounded,
+        "verdict": verdict,
+        "combinations": combinations,
+        "event_count": len(common_names),
         "line_count": len(rows),
     }

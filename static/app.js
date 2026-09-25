@@ -44,6 +44,16 @@ const EXAMPLE_ANCHORS = [
   "开会,2024-03-05 09:00",
 ].join("\n");
 
+// 互斥说法示例：配合可行示例区间作共同约束（共同约束推出 起床→开会 ∈ [85,225]）。
+// 第 1 组右侧 [300,400] 与共同约束矛盾，含它的组合（2、4）被排除；
+// 第 2 组两种说法都可行。查询 起床 与 开会：可行组合都推出 [85,100]，判“甲始终先于乙”。
+const EXAMPLE_MUTEX_GROUPS = [
+  "起床,开会,80,100 | 起床,开会,300,400",
+  "开会,晚饭,60,120 | 晚饭,开会,30,60",
+].join("\n");
+const EXAMPLE_PRECEDENCE_A = "起床";
+const EXAMPLE_PRECEDENCE_B = "开会";
+
 const $ = (id) => document.getElementById(id);
 const resultEl = $("result");
 const redundancyEl = $("redundancy-result");
@@ -55,6 +65,10 @@ const baseEl = $("compare-base");
 const revisedEl = $("compare-revised");
 const anchorInputEl = $("anchor-input");
 const anchorEl = $("anchor-result");
+const mutexInputEl = $("mutex-input");
+const precedenceAEl = $("precedence-a");
+const precedenceBEl = $("precedence-b");
+const precedenceEl = $("precedence-result");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -624,6 +638,7 @@ $("btn-clear").addEventListener("click", () => {
   redundancyEl.innerHTML = "";
   repairEl.innerHTML = "";
   anchorEl.innerHTML = "";
+  precedenceEl.innerHTML = "";
   refreshLineOptions();
   inputEl.focus();
 });
@@ -633,6 +648,7 @@ inputEl.addEventListener("input", () => {
   redundancyEl.innerHTML = "";  // 文本已变，旧的冗余结论作废
   repairEl.innerHTML = "";      // 文本已变，旧的修订建议作废
   anchorEl.innerHTML = "";      // 文本已变，旧的锚定结论作废
+  precedenceEl.innerHTML = "";  // 共同约束已变，旧的先后结论作废
 });
 refreshLineOptions();
 
@@ -827,4 +843,166 @@ $("btn-compare-clear").addEventListener("click", () => {
 // 任一输入框内容变化，旧的比较结果立即作废，避免展示与输入不一致的结论
 [baseEl, revisedEl].forEach((el) => {
   el.addEventListener("input", () => { compareEl.innerHTML = ""; });
+});
+
+// ---------- 互斥说法下的先后查询 ----------
+
+// 合并端点显示：有界显示分钟数，无界如实标注
+function fmtMergedBound(bounded, value, infinity) {
+  return bounded ? String(value) : `${infinity}（无界）`;
+}
+
+function renderPrecedence(data) {
+  const a = data.a;
+  const b = data.b;
+  const lowText = fmtMergedBound(data.lower_bounded, data.merged_low, "−∞");
+  const highText = fmtMergedBound(data.upper_bounded, data.merged_high, "+∞");
+
+  let banner;
+  if (data.verdict === "always_before") {
+    banner = `<div class="banner ok">
+      <h2>✓ ${esc(a)} 始终先于 ${esc(b)}</h2>
+      <p>${data.feasible_count} 个可行组合推出的 t(${esc(b)}) − t(${esc(a)}) 合并下界为
+      <strong>${lowText}</strong> 分钟 ≥ 1：无论各组互斥说法如何取舍，${esc(b)} 都比 ${esc(a)} 晚至少 ${data.merged_low} 分钟。</p>
+    </div>`;
+  } else if (data.verdict === "always_after") {
+    banner = `<div class="banner ok">
+      <h2>✓ ${esc(a)} 始终后于 ${esc(b)}</h2>
+      <p>${data.feasible_count} 个可行组合推出的 t(${esc(b)}) − t(${esc(a)}) 合并上界为
+      <strong>${highText}</strong> 分钟 ≤ −1：无论各组互斥说法如何取舍，${esc(b)} 都比 ${esc(a)} 早至少 ${-data.merged_high} 分钟。</p>
+    </div>`;
+  } else if (data.verdict === "uncertain") {
+    banner = `<div class="banner conflict">
+      <h2>? 先后不确定</h2>
+      <p>${data.feasible_count} 个可行组合的合并区间为 <strong>[${lowText}, ${highText}]</strong>：
+      下界未达到 1 分钟、上界也未低至 −1 分钟——在某些可行取舍下 ${esc(a)} 与 ${esc(b)} 的先后关系不同（或可能同时），无法判定必然先后。</p>
+    </div>`;
+  } else {
+    banner = `<div class="banner err">
+      <h2>✗ 无可行组合，不作先后判断</h2>
+      <p>全部 ${data.combination_count} 个组合都与共同约束冲突${data.common_consistent ? "" : "（共同约束自身即互相矛盾）"}，
+      没有任何一种取舍自洽，无法判断 ${esc(a)} 与 ${esc(b)} 的先后。</p>
+    </div>`;
+  }
+
+  const statsCard = `
+    <div class="card">
+      <h3>组合统计与合并区间</h3>
+      <table>
+        <thead><tr>
+          <th class="num">候选组</th><th class="num">组合总数</th>
+          <th class="num">可行组合</th><th class="num">冲突组合</th>
+          <th class="num">合并下界</th><th class="num">合并上界</th>
+        </tr></thead>
+        <tbody><tr>
+          <td class="num">${data.group_count}</td>
+          <td class="num">${data.combination_count}</td>
+          <td class="num">${data.feasible_count}</td>
+          <td class="num">${data.conflict_count}</td>
+          <td class="num">${lowText}</td>
+          <td class="num">${highText}</td>
+        </tr></tbody>
+      </table>
+      <p class="muted">合并区间即 t(${esc(b)}) − t(${esc(a)}) 跨全部可行组合的最松包络：各组合最紧下界取最小、最紧上界取最大，
+      任一组合对应端无界则合并端无界。判定规则：合并下界 ≥ 1 ⇒ 甲始终先于乙；合并上界 ≤ −1 ⇒ 甲始终后于乙；
+      否则不确定；无可行组合不作判断。</p>
+    </div>`;
+
+  const groupRows = data.groups.map((g, i) => `
+    <tr>
+      <td class="num">第 ${g.line} 行</td>
+      <td><code>${esc(g.left)}</code></td>
+      <td><code>${esc(g.right)}</code></td>
+    </tr>`).join("");
+  const groupsCard = `
+    <div class="card">
+      <h3>互斥候选组（每组二选一）</h3>
+      <table>
+        <thead><tr><th class="num">候选组行号</th><th>左侧说法</th><th>右侧说法</th></tr></thead>
+        <tbody>${groupRows}</tbody>
+      </table>
+    </div>`;
+
+  const comboRows = data.combinations.map((c) => {
+    const choiceTags = c.choices.map((ch, i) =>
+      `<span class="tag choice" title="${esc(c.choice_texts[i])}">${i + 1}${ch === "left" ? "左" : "右"}</span>`
+    ).join(" ");
+    if (c.status === "conflict") {
+      return `<tr>
+        <td class="num">${c.index}</td>
+        <td>${choiceTags}</td>
+        <td><span class="tag combo-conflict">冲突</span></td>
+        <td class="num">—</td>
+        <td class="num">—</td>
+      </tr>`;
+    }
+    const lo = c.derived_low === null ? "−∞" : c.derived_low;
+    const hi = c.derived_high === null ? "+∞" : c.derived_high;
+    return `<tr>
+      <td class="num">${c.index}</td>
+      <td>${choiceTags}</td>
+      <td><span class="tag combo-ok">可行</span></td>
+      <td class="num">${lo}</td>
+      <td class="num">${hi}</td>
+    </tr>`;
+  }).join("");
+  const combosCard = `
+    <div class="card">
+      <h3>逐组合结果</h3>
+      <table>
+        <thead><tr>
+          <th class="num">组合</th><th>各组取舍</th><th>状态</th>
+          <th class="num">最紧下界</th><th class="num">最紧上界</th>
+        </tr></thead>
+        <tbody>${comboRows}</tbody>
+      </table>
+      <p class="muted">“各组取舍”按候选组行序标注每组选了左侧还是右侧（如 “1左 2右”，悬停可见所选说法原文）；
+      最紧上下界为该组合与共同约束联立后推出的 t(${esc(b)}) − t(${esc(a)}) 范围；冲突组合不参与合并。</p>
+    </div>`;
+
+  precedenceEl.innerHTML = banner + statsCard + groupsCard + combosCard;
+}
+
+async function queryPrecedence() {
+  precedenceEl.innerHTML = `<div class="card muted">枚举组合联立中…</div>`;
+  try {
+    const resp = await fetch("/api/precedence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: inputEl.value,
+        groups: mutexInputEl.value,
+        a: precedenceAEl.value,
+        b: precedenceBEl.value,
+      }),
+    });
+    const data = await resp.json();
+    if (data.status === "ok") renderPrecedence(data);
+    else renderErrors(data.errors || [{ line: null, message: "未知错误。" }], precedenceEl);
+  } catch (err) {
+    precedenceEl.innerHTML = `
+      <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
+  }
+}
+
+$("btn-precedence").addEventListener("click", queryPrecedence);
+$("btn-precedence-example").addEventListener("click", () => {
+  mutexInputEl.value = EXAMPLE_MUTEX_GROUPS;
+  precedenceAEl.value = EXAMPLE_PRECEDENCE_A;
+  precedenceBEl.value = EXAMPLE_PRECEDENCE_B;
+  if (!inputEl.value.trim()) {
+    inputEl.value = EXAMPLE_OK;  // 互斥示例配合可行示例区间作共同约束
+    refreshLineOptions();
+  }
+  queryPrecedence();
+});
+$("btn-precedence-clear").addEventListener("click", () => {
+  mutexInputEl.value = "";
+  precedenceEl.innerHTML = "";
+  mutexInputEl.focus();
+});
+// 候选组、查询事件或共同约束任一变化，旧的先后结论立即作废
+mutexInputEl.addEventListener("input", () => { precedenceEl.innerHTML = ""; });
+[precedenceAEl, precedenceBEl].forEach((el) => {
+  el.addEventListener("input", () => { precedenceEl.innerHTML = ""; });
 });
