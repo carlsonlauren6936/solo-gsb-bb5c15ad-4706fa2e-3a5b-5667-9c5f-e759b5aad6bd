@@ -276,3 +276,25 @@ ul.plain li { padding: 4px 0; font-size: 14px; }
   color: #fff;
 }
 .repair-apply:hover { background: #75491f; }
+
+/* 互斥说法下的先后查询 */
+.precedence-query-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.precedence-query-row label { margin-bottom: 0; font-size: 14px; white-space: nowrap; }
+.precedence-query-row input[type="text"] {
+  flex: 1;
+  min-width: 140px;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fdfcf9;
+  color: var(--ink);
+}
+.precedence-query-row input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+tr.combo-conflict td { color: var(--muted); }

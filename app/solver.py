@@ -36,6 +36,15 @@
 任意平移的可行解充当真实日期，而是对每个事件用冗余核对同款单源最短路求其相对零点的
 最紧下界/上界：仅与锚点连通（两端都有界）的事件给出绝对日期时刻（精确点或范围），
 其余事件标为“未定位”。
+
+互斥说法下的先后查询（solve_precedence）：共同约束沿用事件区间文本；候选组每行
+“区间A | 区间B”表示两条只能选一条的互斥说法（最多 6 行，两侧复用区间行格式与同款
+字段校验）。枚举全部 2^N 个“每组选一侧”的组合，分别与共同约束联立（同一套差分约束
+Bellman-Ford），存在负环的组合判为冲突并排除；对每个可行组合复用冗余核对同款
+_derive_bound 求 t(乙) − t(甲) 的最紧下界/上界（推不出的端点为无界），再跨组合合并：
+下界取各组合最小值、上界取各组合最大值，任一组合对应端无界则合并端无界。
+合并下界 ≥ 1 分钟判“甲始终先于乙”，合并上界 ≤ −1 分钟判“甲始终后于乙”，否则判
+“不确定”；无可行组合时不作先后判断。查询的甲、乙必须出现在共同约束中。
 """
 
 from __future__ import annotations
@@ -43,6 +52,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import product
 
 _INT_RE = re.compile(r"^[+-]?\d+$")
 
@@ -90,10 +100,46 @@ class Anchor:
     text: str  # 规范化后的日期时刻文本（YYYY-MM-DD HH:MM）
 
 
-def _parse_int(token: str, field: str, line: int) -> tuple[int | None, str | None]:
-    if not _INT_RE.match(token):
-        return None, f"第{line}行：{field}必须是整数分钟，得到 “{token}”"
-    return int(token), None
+@dataclass(frozen=True)
+class Claim:
+    line: int  # 候选组文本的原始行号
+    side: str  # "A" 或 "B"：该组互斥说法的左/右侧
+    a: str
+    b: str
+    low: int
+    high: int
+
+
+# 互斥说法候选组最多行数：每行二选一，组合数为 2 的幂，限制行数保证枚举耗时可控
+MAX_GROUP_LINES = 6
+
+
+def _validate_interval_fields(a: str, b: str, low_s: str, high_s: str) -> tuple[int | None, int | None, list[str]]:
+    """校验一条区间的四个字段：事件名非空、上下界为整数分钟、下界不大于上界。
+
+    返回 (low, high, 错误片段列表)；有错误时 low/high 可能为 None，调用方应忽略。
+    共同约束行与互斥说法候选组两侧共用同一套校验与措辞。
+    """
+    errors: list[str] = []
+    if not a:
+        errors.append("事件甲名称为空")
+    if not b:
+        errors.append("事件乙名称为空")
+
+    low: int | None = None
+    high: int | None = None
+    if _INT_RE.match(low_s):
+        low = int(low_s)
+    else:
+        errors.append(f"最少分钟必须是整数分钟，得到 “{low_s}”")
+    if _INT_RE.match(high_s):
+        high = int(high_s)
+    else:
+        errors.append(f"最多分钟必须是整数分钟，得到 “{high_s}”")
+
+    if low is not None and high is not None and low > high:
+        errors.append(f"下界 {low} 大于上界 {high}，时间差区间为空")
+    return low, high, errors
 
 
 def parse_text(text: str) -> tuple[list[Row], list[dict]]:
@@ -119,22 +165,7 @@ def parse_text(text: str) -> tuple[list[Row], list[dict]]:
             continue
 
         a, b, low_s, high_s = parts
-        row_errors: list[str] = []
-        if not a:
-            row_errors.append("事件甲名称为空")
-        if not b:
-            row_errors.append("事件乙名称为空")
-
-        low, err_low = _parse_int(low_s, "最少分钟", line_no)
-        high, err_high = _parse_int(high_s, "最多分钟", line_no)
-        if err_low:
-            row_errors.append(err_low.split("：", 1)[1])
-        if err_high:
-            row_errors.append(err_high.split("：", 1)[1])
-
-        if low is not None and high is not None and low > high:
-            row_errors.append(f"下界 {low} 大于上界 {high}，时间差区间为空")
-
+        low, high, row_errors = _validate_interval_fields(a, b, low_s, high_s)
         if row_errors:
             errors.append({"line": line_no, "message": f"第{line_no}行：" + "；".join(row_errors) + "。"})
             continue
@@ -889,5 +920,213 @@ def solve_anchored(text: str, anchors_text: str) -> dict:
         "event_count": len(events),
         "located_count": located_count,
         "anchor_count": len(anchors),
+        "line_count": len(rows),
+    }
+
+
+# ---------- 互斥说法下的先后查询 ----------
+
+# 先后结论的对外标签
+_VERDICT_LABELS = {
+    "before": "甲始终先于乙",
+    "after": "甲始终后于乙",
+    "undetermined": "不确定",
+    "no_feasible": "无可行组合",
+}
+
+
+def parse_groups(text: str) -> tuple[list[list[Claim]], list[dict]]:
+    """按行解析互斥说法候选组：每行 “区间A | 区间B”，两侧均复用区间行格式与同款校验。
+
+    返回 (候选组列表, 错误列表)；每个候选组为 [A侧说法, B侧说法]。
+    空行跳过但行号保留为候选组文本的原始行号；最多 MAX_GROUP_LINES 行。
+    """
+    errors: list[dict] = []
+    groups: list[list[Claim]] = []
+
+    if not text or not text.strip():
+        return groups, [{"line": None, "message": "候选组输入为空：请粘贴每行 “区间A | 区间B” 格式的互斥说法（最多 6 行）。"}]
+
+    non_empty = 0
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue  # 空行不计入校验，但行号保留为候选组文本的原始行号
+        non_empty += 1
+
+        # 兼容中文竖线
+        sides = [s.strip() for s in line.replace("｜", "|").split("|")]
+        if len(sides) != 2:
+            errors.append({
+                "line": line_no,
+                "message": f"候选组第{line_no}行：应为 “区间A | 区间B” 两段互斥说法（以一个 | 分隔），实际得到 {len(sides)} 段。",
+            })
+            continue
+
+        claims: list[Claim] = []
+        for side_label, side_text in zip(("A", "B"), sides):
+            # 兼容中文逗号
+            parts = [p.strip() for p in side_text.replace("，", ",").split(",")]
+            if len(parts) != 4:
+                errors.append({
+                    "line": line_no,
+                    "message": f"候选组第{line_no}行{side_label}侧：应为 4 个字段（事件甲,事件乙,最少分钟,最多分钟），实际得到 {len(parts)} 个。",
+                })
+                break
+            a, b, low_s, high_s = parts
+            low, high, field_errors = _validate_interval_fields(a, b, low_s, high_s)
+            if field_errors:
+                errors.append({
+                    "line": line_no,
+                    "message": f"候选组第{line_no}行{side_label}侧：" + "；".join(field_errors) + "。",
+                })
+                break
+            claims.append(Claim(line_no, side_label, a, b, low, high))  # type: ignore[arg-type]
+        else:
+            groups.append(claims)  # 两侧均有效才成组（for 正常结束、未 break）
+
+    if non_empty > MAX_GROUP_LINES:
+        errors.append({
+            "line": None,
+            "message": f"候选组最多 {MAX_GROUP_LINES} 行，实际得到 {non_empty} 行（每行二选一，组合数为 2 的幂，限制行数以保证枚举耗时可控）。",
+        })
+
+    return groups, errors
+
+
+def solve_precedence(text: str, groups_text: str, qa: str, qb: str) -> dict:
+    """互斥说法下的先后查询：共同约束 + 每组二选一的全部组合枚举联立。
+
+    共同约束沿用事件区间文本；候选组每行 “区间A | 区间B” 表示两条只能选一条的说法。
+    枚举全部 2^N 个组合（N ≤ MAX_GROUP_LINES），每个组合 = 共同约束 + 各组所选一侧，
+    复用同一套差分约束 Bellman-Ford 联立：存在负环的组合判为冲突并排除；对其余可行
+    组合复用冗余核对同款 _derive_bound 求 t(乙) − t(甲) 的最紧下界/上界（推不出的
+    端点为无界）。跨组合合并：下界取各组合最小值、上界取各组合最大值，任一组合对应
+    端无界则合并端无界。
+
+    判定：无可行组合 ⇒ 不作先后判断（no_feasible）；合并下界 ≥ 1 分钟 ⇒ 甲始终先于乙
+    （before）；合并上界 ≤ −1 分钟 ⇒ 甲始终后于乙（after）；其余 ⇒ 不确定（undetermined）。
+    查询的甲、乙必须出现在共同约束中。
+    """
+    qa, qb = (qa or "").strip(), (qb or "").strip()
+
+    rows, errors = parse_text(text)  # 共同约束复用现有区间校验（含空文本报错）
+    groups, group_errors = parse_groups(groups_text)
+    errors = errors + group_errors
+
+    # 查询的甲、乙须出现在共同约束中
+    if not qa:
+        errors.append({"line": None, "message": "查询的事件甲为空：请填写要查询先后关系的事件甲。"})
+    if not qb:
+        errors.append({"line": None, "message": "查询的事件乙为空：请填写要查询先后关系的事件乙。"})
+    if qa and qb and qa == qb:
+        errors.append({"line": None, "message": f"查询的事件甲、乙相同（“{qa}”）：请查询两个不同事件的先后关系。"})
+    if rows:
+        common_names = {r.a for r in rows} | {r.b for r in rows}
+        for label, name in (("甲", qa), ("乙", qb)):
+            if name and name not in common_names:
+                errors.append({
+                    "line": None,
+                    "message": f"查询的事件{label}“{name}”未出现在共同约束中：先后查询的甲、乙须出现在共同约束中。",
+                })
+    if errors:
+        return {"status": "error", "errors": errors}
+
+    combinations: list[dict] = []
+    feasible_count = 0
+    merged_low: int | None = None   # 跨组合最小下界（只统计有界端点）
+    merged_high: int | None = None  # 跨组合最大上界（只统计有界端点）
+    lower_unbounded = False  # 任一可行组合下界无界 ⇒ 合并下界无界
+    upper_unbounded = False  # 任一可行组合上界无界 ⇒ 合并上界无界
+
+    for combo_index, picks in enumerate(product(*groups), start=1):
+        # 该组合 = 共同约束 + 各组所选一侧，联立（同一套建边与 Bellman-Ford）
+        combo_rows = rows + [Row(c.line, c.a, c.b, c.low, c.high) for c in picks]
+        names, index, edges = _build_graph(combo_rows)
+        _, _, last_relaxed = _relax_all(names, edges)
+        pick_desc = [
+            {"line": c.line, "side": c.side, "a": c.a, "b": c.b, "low": c.low, "high": c.high}
+            for c in picks
+        ]
+        if last_relaxed is not None:
+            combinations.append({
+                "index": combo_index,
+                "picks": pick_desc,
+                "feasible": False,
+                "low": None,
+                "high": None,
+                "lower_bounded": False,
+                "upper_bounded": False,
+            })
+            continue
+
+        ia, ib = index[qa], index[qb]
+        # 上界：t(乙) − t(甲) 的最紧上界 = 甲 -> 乙 最短路；下界 = 乙 -> 甲 最短路取负
+        high_val, _ = _derive_bound(names, edges, ia, ib)
+        low_val, _ = _derive_bound(names, edges, ib, ia)
+        low = -low_val if low_val is not None else None
+        high = high_val
+
+        feasible_count += 1
+        if low is None:
+            lower_unbounded = True
+        else:
+            merged_low = low if merged_low is None else min(merged_low, low)
+        if high is None:
+            upper_unbounded = True
+        else:
+            merged_high = high if merged_high is None else max(merged_high, high)
+        combinations.append({
+            "index": combo_index,
+            "picks": pick_desc,
+            "feasible": True,
+            "low": low,
+            "high": high,
+            "lower_bounded": low is not None,
+            "upper_bounded": high is not None,
+        })
+
+    conflict_count = len(combinations) - feasible_count
+    if feasible_count == 0:
+        # 无可行组合：不作先后判断，合并区间无意义
+        verdict = "no_feasible"
+        lower_bounded = upper_bounded = False
+        merged_low = merged_high = None
+    else:
+        lower_bounded = not lower_unbounded
+        upper_bounded = not upper_unbounded
+        if lower_bounded and merged_low is not None and merged_low >= 1:
+            verdict = "before"
+        elif upper_bounded and merged_high is not None and merged_high <= -1:
+            verdict = "after"
+        else:
+            verdict = "undetermined"
+
+    return {
+        "status": "ok",
+        "a": qa,
+        "b": qb,
+        "groups": [
+            {
+                "line": g[0].line,
+                "sides": [
+                    {"side": c.side, "a": c.a, "b": c.b, "low": c.low, "high": c.high}
+                    for c in g
+                ],
+            }
+            for g in groups
+        ],
+        "group_count": len(groups),
+        "combination_count": len(combinations),
+        "feasible_count": feasible_count,
+        "conflict_count": conflict_count,
+        "lower_bounded": lower_bounded,
+        "upper_bounded": upper_bounded,
+        "merged_low": merged_low if lower_bounded else None,
+        "merged_high": merged_high if upper_bounded else None,
+        "verdict": verdict,
+        "verdict_label": _VERDICT_LABELS[verdict],
+        "combinations": combinations,
+        "event_count": len({r.a for r in rows} | {r.b for r in rows}),
         "line_count": len(rows),
     }

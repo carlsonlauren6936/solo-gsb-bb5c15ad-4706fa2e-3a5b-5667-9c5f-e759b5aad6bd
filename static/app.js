@@ -44,6 +44,16 @@ const EXAMPLE_ANCHORS = [
   "开会,2024-03-05 09:00",
 ].join("\n");
 
+// 互斥说法示例：配合可行示例共同约束。第 1 组 A 侧（起床比开会晚 300~400 分钟）与共同约束
+// 第 5 行（开会比起床晚 80~240）冲突，含它的组合被排除；第 2 组两种说法都可行。
+// 查询“起床 vs 开会”：2 个可行组合合并区间 [85, 225]，下界 ≥ 1 ⇒ 起床始终先于开会。
+const EXAMPLE_PRECEDENCE_GROUPS = [
+  "开会,起床,-400,-300 | 起床,开会,80,240",
+  "早饭,午休,5,15 | 出门,午休,5,15",
+].join("\n");
+const EXAMPLE_PRECEDENCE_A = "起床";
+const EXAMPLE_PRECEDENCE_B = "开会";
+
 const $ = (id) => document.getElementById(id);
 const resultEl = $("result");
 const redundancyEl = $("redundancy-result");
@@ -55,6 +65,10 @@ const baseEl = $("compare-base");
 const revisedEl = $("compare-revised");
 const anchorInputEl = $("anchor-input");
 const anchorEl = $("anchor-result");
+const precEl = $("precedence-result");
+const precGroupsEl = $("prec-groups");
+const precAEl = $("prec-a");
+const precBEl = $("prec-b");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -624,6 +638,7 @@ $("btn-clear").addEventListener("click", () => {
   redundancyEl.innerHTML = "";
   repairEl.innerHTML = "";
   anchorEl.innerHTML = "";
+  precEl.innerHTML = "";
   refreshLineOptions();
   inputEl.focus();
 });
@@ -633,6 +648,7 @@ inputEl.addEventListener("input", () => {
   redundancyEl.innerHTML = "";  // 文本已变，旧的冗余结论作废
   repairEl.innerHTML = "";      // 文本已变，旧的修订建议作废
   anchorEl.innerHTML = "";      // 文本已变，旧的锚定结论作废
+  precEl.innerHTML = "";        // 共同约束已变，旧的先后查询结论作废
 });
 refreshLineOptions();
 
@@ -827,4 +843,158 @@ $("btn-compare-clear").addEventListener("click", () => {
 // 任一输入框内容变化，旧的比较结果立即作废，避免展示与输入不一致的结论
 [baseEl, revisedEl].forEach((el) => {
   el.addEventListener("input", () => { compareEl.innerHTML = ""; });
+});
+
+// ---------- 互斥说法下的先后查询 ----------
+
+const PREC_VERDICT = {
+  before: { cls: "ok", title: "✓ 甲始终先于乙" },
+  after: { cls: "ok", title: "✓ 甲始终后于乙" },
+  undetermined: { cls: "conflict", title: "? 先后关系不确定" },
+  no_feasible: { cls: "err", title: "✗ 无可行组合，不作先后判断" },
+};
+
+function renderPrecedence(data) {
+  const v = PREC_VERDICT[data.verdict] || PREC_VERDICT.undetermined;
+  const noFeasible = data.verdict === "no_feasible";
+  // 合并区间端点：无界显示 ±∞；无可行组合时合并区间无意义，显示 —
+  const lowText = noFeasible ? "—" : (data.lower_bounded ? String(data.merged_low) : "−∞（无界）");
+  const highText = noFeasible ? "—" : (data.upper_bounded ? String(data.merged_high) : "+∞（无界）");
+
+  let verdictReason;
+  if (data.verdict === "before") {
+    verdictReason = `全部 ${data.feasible_count} 个可行组合中，t(${esc(data.b)}) − t(${esc(data.a)})
+      的合并下界为 <strong>${lowText}</strong> 分钟 ≥ 1 分钟：无论各组互斥说法如何取舍，
+      <strong>${esc(data.a)}</strong> 始终先于 <strong>${esc(data.b)}</strong>。`;
+  } else if (data.verdict === "after") {
+    verdictReason = `全部 ${data.feasible_count} 个可行组合中，t(${esc(data.b)}) − t(${esc(data.a)})
+      的合并上界为 <strong>${highText}</strong> 分钟 ≤ −1 分钟：无论各组互斥说法如何取舍，
+      <strong>${esc(data.a)}</strong> 始终后于 <strong>${esc(data.b)}</strong>。`;
+  } else if (data.verdict === "undetermined") {
+    verdictReason = `全部 ${data.feasible_count} 个可行组合的合并区间为
+      <strong>[${lowText}, ${highText}]</strong>：合并下界未达到 ≥ 1 分钟、合并上界也未达到 ≤ −1 分钟，
+      互斥说法的不同取舍可能改变先后关系，判为不确定。`;
+  } else {
+    verdictReason = `全部 ${data.combination_count} 个组合与共同约束联立后均互相冲突，
+      没有任何可行组合，不作先后判断。`;
+  }
+
+  // 候选组对照表：每行的 A/B 两侧说法
+  const fmtSide = (s) => `${s.a},${s.b},${s.low},${s.high}`;
+  const groupRows = data.groups.map((g) => `<tr>
+      <td class="num">第 ${g.line} 行</td>
+      <td><code>${esc(fmtSide(g.sides[0]))}</code></td>
+      <td><code>${esc(fmtSide(g.sides[1]))}</code></td>
+    </tr>`).join("");
+
+  // 组合明细表：每组所选一侧、联立结果、可行组合的 t(乙)−t(甲) 最紧区间
+  const comboRows = data.combinations.map((c) => {
+    const picks = c.picks.map((p) => `第${p.line}行${p.side}侧`).join("、");
+    if (!c.feasible) {
+      return `<tr class="combo-conflict">
+        <td class="num">${c.index}</td>
+        <td>${esc(picks)}</td>
+        <td><span class="tag unlocated">冲突，排除</span></td>
+        <td class="num">—</td>
+      </tr>`;
+    }
+    const lo = c.lower_bounded ? String(c.low) : "−∞";
+    const hi = c.upper_bounded ? String(c.high) : "+∞";
+    return `<tr>
+      <td class="num">${c.index}</td>
+      <td>${esc(picks)}</td>
+      <td><span class="tag exact">可行</span></td>
+      <td class="num">[${lo}, ${hi}]</td>
+    </tr>`;
+  }).join("");
+
+  precEl.innerHTML = `
+    <div class="banner ${v.cls}">
+      <h2>${v.title}</h2>
+      <p>${verdictReason}</p>
+    </div>
+    <div class="card">
+      <h3>组合统计与合并区间</h3>
+      <table>
+        <thead><tr>
+          <th class="num">候选组</th><th class="num">组合总数</th>
+          <th class="num">可行组合</th><th class="num">冲突组合</th>
+          <th class="num">合并下界</th><th class="num">合并上界</th>
+        </tr></thead>
+        <tbody><tr>
+          <td class="num">${data.group_count}</td>
+          <td class="num">${data.combination_count}</td>
+          <td class="num">${data.feasible_count}</td>
+          <td class="num">${data.conflict_count}</td>
+          <td class="num">${lowText}</td>
+          <td class="num">${highText}</td>
+        </tr></tbody>
+      </table>
+      <p class="muted">合并区间：跨可行组合取 t(乙) − t(甲) 最紧下界的最小值、最紧上界的最大值；
+      任一可行组合对应端无界则合并端无界。判定规则：合并下界 ≥ 1 分钟 ⇒ 甲始终先于乙；
+      合并上界 ≤ −1 分钟 ⇒ 甲始终后于乙；否则不确定；无可行组合不作先后判断。</p>
+    </div>
+    <div class="card">
+      <h3>候选组（每行二选一）</h3>
+      <table>
+        <thead><tr><th class="num">行号</th><th>A 侧说法</th><th>B 侧说法</th></tr></thead>
+        <tbody>${groupRows}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>组合明细（共 ${data.combination_count} 个）</h3>
+      <table>
+        <thead><tr>
+          <th class="num">组合</th><th>选取</th><th>联立结果</th>
+          <th class="num">t(乙) − t(甲) 最紧区间</th>
+        </tr></thead>
+        <tbody>${comboRows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function queryPrecedence() {
+  precEl.innerHTML = `<div class="card muted">枚举组合联立中…</div>`;
+  try {
+    const resp = await fetch("/api/precedence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: inputEl.value,
+        groups: precGroupsEl.value,
+        a: precAEl.value,
+        b: precBEl.value,
+      }),
+    });
+    const data = await resp.json();
+    if (data.status === "ok") {
+      renderPrecedence(data);
+    } else {
+      renderErrors(data.errors || [{ line: null, message: "未知错误。" }], precEl);
+    }
+  } catch (err) {
+    precEl.innerHTML = `
+      <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
+  }
+}
+
+$("btn-precedence").addEventListener("click", queryPrecedence);
+$("btn-precedence-example").addEventListener("click", () => {
+  precGroupsEl.value = EXAMPLE_PRECEDENCE_GROUPS;
+  precAEl.value = EXAMPLE_PRECEDENCE_A;
+  precBEl.value = EXAMPLE_PRECEDENCE_B;
+  if (!inputEl.value.trim()) {
+    inputEl.value = EXAMPLE_OK;  // 互斥示例配合可行示例共同约束演示
+    refreshLineOptions();
+  }
+  queryPrecedence();
+});
+$("btn-precedence-clear").addEventListener("click", () => {
+  precGroupsEl.value = "";
+  precEl.innerHTML = "";
+  precGroupsEl.focus();
+});
+// 候选组或查询事件变化，旧的先后查询结论立即作废
+[precGroupsEl, precAEl, precBEl].forEach((el) => {
+  el.addEventListener("input", () => { precEl.innerHTML = ""; });
 });
